@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+    "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="egovframework.mapper.ArticleMapper">
+
+
+	<!-- 총 게시글 수 조회 -->
+	<select id="countArticlesWithSearch" parameterType="map"
+		resultType="int">
+		SELECT COUNT(*) FROM article
+		WHERE is_deleted = FALSE
+		<if test="searchType != null and keyword != null">
+			<choose>
+				<when test="searchType == 'title'">
+					AND title LIKE CONCAT('%', #{keyword}, '%')
+				</when>
+				<when test="searchType == 'writer'">
+					AND writer LIKE CONCAT('%', #{keyword}, '%')
+				</when>
+			</choose>
+		</if>
+	</select>
+
+	<!-- 페이징된 계층형 게시글 조회 -->
+	<select id="getPagedArticleHierarchy" parameterType="map"
+		resultType="egovframework.vo.ArticleVO">
+		WITH RECURSIVE ArticleTree AS (
+		SELECT
+		article_id AS articleId,
+		title,
+		content,
+		writer,
+		created_at AS createdAt,
+		view_count AS viewCount,
+		parent_id AS parentId,
+		is_deleted AS isDeleted,
+		0 AS depth,
+		article_id AS
+		rootId -- 원글(최상위 부모)의 ID
+		FROM article
+		WHERE parent_id IS NULL AND
+		is_deleted = FALSE
+		<if test="searchType != null and keyword != null"> 
+			<choose>
+				<when test="searchType == 'title'">
+					AND title LIKE CONCAT('%', #{keyword}, '%')
+				</when>
+				<when test="searchType == 'writer'">
+					AND writer LIKE CONCAT('%', #{keyword}, '%')
+				</when>
+			</choose>
+		</if>
+		UNION ALL
+		SELECT
+		a.article_id AS articleId,
+		a.title,
+		a.content,
+		a.writer,
+		a.created_at AS createdAt,
+		a.view_count AS viewCount,
+		a.parent_id AS
+		parentId,
+		a.is_deleted AS isDeleted,
+		at.depth + 1 AS depth,
+		at.rootId -- 최상위 부모 ID를 유지
+		FROM article a
+		INNER JOIN ArticleTree at ON a.parent_id =
+		at.articleId
+		WHERE
+		a.is_deleted = FALSE
+		)
+		SELECT
+		ROW_NUMBER() OVER ( 
+            ORDER BY rootId ASC, depth DESC, createdAt DESC
+        ) AS rowNum, -- 채번은 역순으로 주기위해서 정렬을 반대로 주입했습니다.
+		articleId,
+		title,
+		content,
+		writer,
+		createdAt,
+		viewCount,
+		parentId,
+		isDeleted,
+		depth
+		FROM ArticleTree
+		ORDER BY
+		rootId DESC, -- 최상위 부모(원글)를 기준으로 정렬
+		depth ASC, -- 깊이(답글 수준)에 따라 정렬
+		createdAt ASC -- 같은 깊이에서는 작성일 순으로 정렬
+		LIMIT 
+		#{size} OFFSET #{offset}; -- 필요한 페이지의 데이터만 반환합니다.
+	</select>
+
+	<!-- 게시글 상세 조회 -->
+	<select id="selectArticleById" parameterType="int"
+		resultType="egovframework.vo.ArticleVO">
+		SELECT article_id, title, content, writer, password,
+		created_at, updated_at, view_count, parent_id, depth, is_deleted
+		FROM
+		article
+		WHERE article_id = #{articleId} AND is_deleted = FALSE;
+	</select>
+
+	<!-- 게시글 추가 -->
+	<insert id="insertArticle"
+		parameterType="egovframework.vo.ArticleVO" useGeneratedKeys="true"
+		keyProperty="articleId">
+		INSERT INTO article (
+		title,
+		content,
+		writer,
+		password,
+		parent_id,
+		depth,        <!-- 
+			계층 구조 깊이 -->
+		created_at,
+		updated_at,
+		view_count,
+		is_deleted
+		) VALUES (
+		#{title},
+		#{content},
+		#{writer},
+		#{password},
+		NULL,          <!-- 원글이므로 부모 ID 없음 -->
+		0,             <!-- 원글의 depth는 0 -->
+		NOW(),
+		NOW(),
+		0,
+		FALSE
+		)
+	</insert>
+
+	<!-- 게시글 답글 추가 -->
+	<insert id="insertReply"
+		parameterType="egovframework.vo.ArticleVO" useGeneratedKeys="true"
+		keyProperty="articleId">
+		INSERT INTO article (
+		title,
+		content,
+		writer,
+		password,
+		parent_id,
+		depth,        <!-- 
+			부모 글의 depth + 1 -->
+		created_at,
+		updated_at,
+		view_count,
+		is_deleted
+		) VALUES (
+		#{title},
+		#{content},
+		#{writer},
+		#{password},
+		#{parentId},   <!-- 부모 글 ID -->
+		#{depth},      <!-- 부모 글의 depth + 1 -->
+		NOW(),
+		NOW(),
+		0,
+		FALSE
+		)
+	</insert>
+
+
+	<!-- 게시글 수정 -->
+	<update id="updateArticle"
+		parameterType="egovframework.vo.ArticleVO">
+		UPDATE article
+		SET writer = #{writer},
+		password = #{password},  <!-- 비밀번호 업데이트 -->
+		title = #{title},
+		content = #{content},
+		updated_at = NOW()  <!-- 수정 시간 반영 -->
+		WHERE article_id = #{articleId}
+	</update>
+
+
+	<!-- 게시글 삭제 (논리 삭제) -->
+	<!-- recursive 재귀참조를 사용 자녀게시글 찾아서 소프트 딜리트 업데이트합니다. -->
+	<update id="deleteArticle" parameterType="int">
+		WITH RECURSIVE
+		ArticleTree AS (
+		SELECT article_id
+		FROM article
+		WHERE article_id =
+		#{articleId}
+
+		UNION ALL
+
+		SELECT a.article_id
+		FROM article a
+		INNER JOIN
+		ArticleTree at ON a.parent_id = at.article_id
+		)
+		UPDATE article
+		SET
+		is_deleted = TRUE
+		WHERE article_id IN (SELECT article_id FROM
+		ArticleTree);
+	</update>
+
+
+	<!-- 조회수 증가 -->
+	<update id="incrementViewCount" parameterType="int">
+		UPDATE article
+		SET
+		view_count = view_count + 1
+		WHERE article_id = #{articleId};
+	</update>
+
+	<!-- 비밀번호 조회 -->
+	<select id="checkPassword" parameterType="int"
+		resultType="string">
+		SELECT password
+		FROM article
+		WHERE article_id = #{articleId}
+	</select>
+
+	<!-- 첨부파일 저장 -->
+	<insert id="insertAttachFile"
+		parameterType="egovframework.vo.AttachFileVO">
+		INSERT INTO attach_file (
+		article_id, file_name,
+		file_path, file_size, uuid, created_at
+		) VALUES (
+		#{articleId},
+		#{fileName}, #{filePath}, #{fileSize}, CAST(#{uuid} AS UUID), NOW()
+		)
+	</insert>
+	<!-- 첨부파일 다중 가져오기 -->
+	<select id="getAttachFilesByArticleId" parameterType="int"
+		resultType="egovframework.vo.AttachFileVO">
+		SELECT * FROM attach_file WHERE article_id = #{articleId};
+	</select>
+	<!-- 파일 다운로드 (파일 한개 정보 가져오기) -->
+	<select id="selectAttachFileById" parameterType="int"
+		resultType="egovframework.vo.AttachFileVO">
+		SELECT * FROM attach_file WHERE file_id = #{fileId}
+	</select>
+
+	<!-- 첨부파일 삭제 -->
+	<delete id="deleteAttachFile" parameterType="int">
+		DELETE FROM
+		attach_file WHERE file_id = #{fileId}
+	</delete>
+
+	<!-- 게시글 삭제시 원글과 자녀글들의 id를 가져오기 -->
+	<select id="selectArticleAndRepliesIds" parameterType="int"
+		resultType="int">
+		WITH RECURSIVE ArticleTree AS (
+		-- 시작점: 원글
+		SELECT article_id
+		FROM article
+		WHERE article_id = #{articleId} AND is_deleted = FALSE
+
+		UNION ALL
+
+		-- 자식 글들을 재귀적으로 조회
+		SELECT a.article_id
+		FROM article a
+		INNER JOIN
+		ArticleTree at ON a.parent_id = at.article_id
+		WHERE a.is_deleted =
+		FALSE
+		)
+		SELECT article_id FROM ArticleTree;
+	</select>
+
+
+</mapper>
